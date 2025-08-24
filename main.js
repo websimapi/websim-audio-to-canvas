@@ -11,105 +11,111 @@ canvas.width = INITIAL_CANVAS_WIDTH;
 
 let audioContext;
 let stream;
-let scriptNode;
+let analyser;
 let source;
 let isRecording = false;
 
 // We draw pixels column by column from left to right.
 let currentX = 0;
 
-// Buffer to hold continuous audio data
-let audioBuffer = new Float32Array(0);
+// Animation frame for continuous drawing
 let animationFrameId;
 
-// Function to handle drawing the audio data to the canvas
-function drawAudioColumns() {
-    const samplesPerColumn = CANVAS_HEIGHT * 4; // 4 samples for R, G, B, A
-
-    // Process as many full columns as we have data for
-    while (audioBuffer.length >= samplesPerColumn) {
-        // Take the samples needed for one column from the start of the buffer
-        const columnSamples = audioBuffer.subarray(0, samplesPerColumn);
-        const pixelData = new Uint8ClampedArray(samplesPerColumn);
-
-        for (let i = 0; i < samplesPerColumn; i++) {
-            // Map audio sample from [-1, 1] to a color component [0, 255]
-            pixelData[i] = (columnSamples[i] + 1) * 127.5;
-        }
-
-        // Create an ImageData object for the single column
-        const columnImageData = new ImageData(pixelData, 1, CANVAS_HEIGHT);
-
-        // Draw this column onto the canvas at the current X position
-        ctx.putImageData(columnImageData, currentX, 0);
-
-        // Move to the next column
-        currentX++;
-
-        // If we reach the end of the canvas, expand it
-        if (currentX >= canvas.width) {
-            const newWidth = canvas.width + INITIAL_CANVAS_WIDTH;
-            // Create a temporary canvas to hold the current content
-            const tempCanvas = document.createElement('canvas');
-            tempCanvas.width = canvas.width;
-            tempCanvas.height = canvas.height;
-            const tempCtx = tempCanvas.getContext('2d');
-            tempCtx.drawImage(canvas, 0, 0);
-            // Resize the main canvas and draw the old content back
-            canvas.width = newWidth;
-            ctx.drawImage(tempCanvas, 0, 0);
-        }
-        
-        // Auto-scroll to the latest drawing position
-        canvasContainer.scrollLeft = currentX;
-        
-        // Remove the processed samples from the main buffer
-        audioBuffer = audioBuffer.subarray(samplesPerColumn);
+// Function to draw audio data as pixels
+function drawAudioData() {
+    if (!isRecording || !analyser) {
+        return;
     }
-    // Continue the drawing loop
-    animationFrameId = requestAnimationFrame(drawAudioColumns);
+
+    // Get frequency data from the analyser
+    const bufferLength = analyser.frequencyBinCount;
+    const dataArray = new Uint8Array(bufferLength);
+    analyser.getByteFrequencyData(dataArray);
+
+    // Create pixel data for one column (height = 42 pixels)
+    const imageData = ctx.createImageData(1, CANVAS_HEIGHT);
+    const pixels = imageData.data;
+
+    // Map the first 42 frequency values to pixels (or repeat if we have fewer)
+    for (let y = 0; y < CANVAS_HEIGHT; y++) {
+        const audioIndex = Math.floor((y / CANVAS_HEIGHT) * bufferLength);
+        const audioValue = dataArray[audioIndex] || 0;
+        
+        const pixelIndex = y * 4; // Each pixel is 4 bytes (RGBA)
+        
+        // Convert audio value (0-255) to color
+        // Use the audio value for different color channels
+        pixels[pixelIndex] = audioValue;     // Red
+        pixels[pixelIndex + 1] = audioValue * 0.7; // Green (slightly less)
+        pixels[pixelIndex + 2] = audioValue * 0.4; // Blue (even less)
+        pixels[pixelIndex + 3] = 255; // Alpha (fully opaque)
+    }
+
+    // Draw the column on the canvas
+    ctx.putImageData(imageData, currentX, 0);
+
+    // Move to the next column
+    currentX++;
+
+    // If we reach the end of the canvas, expand it
+    if (currentX >= canvas.width) {
+        const newWidth = canvas.width + INITIAL_CANVAS_WIDTH;
+        
+        // Create temporary canvas to preserve existing content
+        const tempCanvas = document.createElement('canvas');
+        const tempCtx = tempCanvas.getContext('2d');
+        tempCanvas.width = canvas.width;
+        tempCanvas.height = canvas.height;
+        tempCtx.drawImage(canvas, 0, 0);
+        
+        // Resize main canvas and restore content
+        canvas.width = newWidth;
+        ctx.drawImage(tempCanvas, 0, 0);
+    }
+    
+    // Auto-scroll to show the latest data
+    canvasContainer.scrollLeft = Math.max(0, currentX - canvasContainer.clientWidth + 50);
+    
+    // Continue the animation loop
+    animationFrameId = requestAnimationFrame(drawAudioData);
 }
 
 async function start() {
     try {
         statusEl.textContent = 'Requesting microphone access...';
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        stream = await navigator.mediaDevices.getUserMedia({ 
+            audio: {
+                echoCancellation: false,
+                noiseSuppression: false,
+                autoGainControl: false
+            }
+        });
 
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
         
-        // Resume context if it's in a suspended state (for browser autoplay policies)
         if (audioContext.state === 'suspended') {
             await audioContext.resume();
         }
         
-        // Using ScriptProcessorNode for simplicity.
-        // A buffer size of 2048 gives us a decent chunk of data to process.
-        const bufferSize = 2048; 
+        // Create analyser for frequency data
+        analyser = audioContext.createAnalyser();
+        analyser.fftSize = 128; // Small FFT size for responsiveness
+        analyser.smoothingTimeConstant = 0.3;
         
         source = audioContext.createMediaStreamSource(stream);
-        scriptNode = audioContext.createScriptProcessor(bufferSize, 1, 1);
-
-        scriptNode.onaudioprocess = (audioProcessingEvent) => {
-            const inputBuffer = audioProcessingEvent.inputBuffer;
-            const inputData = inputBuffer.getChannelData(0); // Get data from the first channel
-            
-            // Append new data to our continuous buffer
-            const newBuffer = new Float32Array(audioBuffer.length + inputData.length);
-            newBuffer.set(audioBuffer);
-            newBuffer.set(inputData, audioBuffer.length);
-            audioBuffer = newBuffer;
-        };
-
-        source.connect(scriptNode);
-        scriptNode.connect(audioContext.destination);
+        source.connect(analyser);
 
         isRecording = true;
         startButton.textContent = 'Stop Listening';
         startButton.classList.add('recording');
-        statusEl.textContent = 'Listening... Your voice is being drawn on the canvas.';
+        statusEl.textContent = 'Listening... Speak to see audio pixels appear!';
+
+        // Clear canvas and reset position
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        currentX = 0;
 
         // Start the drawing loop
-        drawAudioColumns();
+        drawAudioData();
 
     } catch (err) {
         console.error('Error accessing microphone:', err);
@@ -124,26 +130,18 @@ function stop() {
     if (source) {
         source.disconnect();
     }
-    if (scriptNode) {
-        scriptNode.disconnect();
-        scriptNode.onaudioprocess = null;
-    }
     if (audioContext) {
-        // Use a Promise-based close to handle it correctly.
         audioContext.close().then(() => {
             audioContext = null;
         });
     }
 
-    // Stop the drawing loop
     if (animationFrameId) {
         cancelAnimationFrame(animationFrameId);
         animationFrameId = null;
     }
 
-    // Clear the buffer
-    audioBuffer = new Float32Array(0);
-
+    analyser = null;
     isRecording = false;
     startButton.textContent = 'Start Listening';
     startButton.classList.remove('recording');
