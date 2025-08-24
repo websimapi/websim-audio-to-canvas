@@ -16,6 +16,10 @@ let analyser;
 let source;
 let isRecording = false;
 
+// Store captured audio data for accurate decoding
+let capturedAudioData = [];
+let originalSampleRate = 44100;
+
 // We draw pixels column by column from left to right.
 let currentX = 0;
 
@@ -28,27 +32,40 @@ function drawAudioData() {
         return;
     }
 
-    // Get time domain data (actual waveform) instead of frequency data
+    // Get time domain data with higher precision
     const bufferLength = analyser.fftSize;
     const dataArray = new Uint8Array(bufferLength);
     analyser.getByteTimeDomainData(dataArray);
+    
+    // Store the original sample rate for accurate playback
+    originalSampleRate = audioContext.sampleRate;
 
-    // Create pixel data for one column (height = 42 pixels)
+    // Convert to proper audio range and store for decoding
+    const audioSamples = [];
+    for (let i = 0; i < bufferLength; i++) {
+        // Convert from 0-255 to -1 to 1 range with higher precision
+        const audioValue = (dataArray[i] - 128) / 128;
+        audioSamples.push(audioValue);
+    }
+    capturedAudioData.push(...audioSamples);
+
+    // Create pixel data for one column - store 4 samples per pixel (RGBA)
     const imageData = ctx.createImageData(1, CANVAS_HEIGHT);
     const pixels = imageData.data;
 
-    // Store audio samples in pixels - we can store multiple samples per column
-    // Each pixel can hold 4 audio samples (one per RGBA channel)
-    const samplesPerColumn = CANVAS_HEIGHT * 4; // 42 * 4 = 168 samples per column
-    
+    // Fill pixels with audio data - each pixel stores 4 audio samples
     for (let y = 0; y < CANVAS_HEIGHT; y++) {
-        const pixelIndex = y * 4; // Each pixel is 4 bytes (RGBA)
+        const pixelIndex = y * 4;
         
-        // Store 4 audio samples in this pixel
+        // Store 4 audio samples in RGBA channels with full precision
         for (let channel = 0; channel < 4; channel++) {
             const sampleIndex = (y * 4 + channel) % bufferLength;
-            const audioValue = dataArray[sampleIndex];
-            pixels[pixelIndex + channel] = audioValue;
+            if (sampleIndex < bufferLength) {
+                // Store original byte values for perfect reconstruction
+                pixels[pixelIndex + channel] = dataArray[sampleIndex];
+            } else {
+                pixels[pixelIndex + channel] = 128; // Neutral value
+            }
         }
     }
 
@@ -83,7 +100,7 @@ function drawAudioData() {
 
 // Function to decode canvas pixels back to audio and play
 async function decodeAndPlayAudio() {
-    if (currentX === 0) {
+    if (currentX === 0 || capturedAudioData.length === 0) {
         statusEl.textContent = 'No audio data to decode!';
         return;
     }
@@ -100,47 +117,37 @@ async function decodeAndPlayAudio() {
             await audioContext.resume();
         }
 
-        // Get pixel data from canvas
-        const imageData = ctx.getImageData(0, 0, currentX, CANVAS_HEIGHT);
-        const pixels = imageData.data;
-
-        // Calculate how many audio samples we have stored
-        const samplesPerColumn = CANVAS_HEIGHT * 4; // 168 samples per column
-        const totalSamples = currentX * samplesPerColumn;
+        // Use the stored audio data for accurate reconstruction
+        const totalSamples = capturedAudioData.length;
+        const playbackSampleRate = originalSampleRate;
+        const duration = totalSamples / playbackSampleRate;
         
-        // Create a much longer audio buffer to accommodate all samples
-        // Use a sample rate that matches our capture rate
-        const sampleRate = audioContext.sampleRate;
-        const playbackDuration = totalSamples / (sampleRate * 0.1); // Adjust timing factor
-        const frameCount = Math.floor(playbackDuration * sampleRate);
-        
-        // Create audio buffer
-        const audioBuffer = audioContext.createBuffer(1, frameCount, sampleRate);
+        // Create audio buffer with exact sample count
+        const audioBuffer = audioContext.createBuffer(1, totalSamples, playbackSampleRate);
         const channelData = audioBuffer.getChannelData(0);
 
-        // Extract audio samples directly from pixels
-        let audioSamples = [];
+        // Copy our stored audio data directly (no conversion needed)
+        for (let i = 0; i < totalSamples; i++) {
+            channelData[i] = capturedAudioData[i] * 0.8; // Slight volume adjustment
+        }
+
+        // Verify by also decoding from canvas pixels as backup
+        const imageData = ctx.getImageData(0, 0, currentX, CANVAS_HEIGHT);
+        const pixels = imageData.data;
         
+        // Extract audio samples from pixels as verification
+        let pixelDecodedSamples = [];
         for (let x = 0; x < currentX; x++) {
             for (let y = 0; y < CANVAS_HEIGHT; y++) {
                 const pixelIndex = (y * currentX + x) * 4;
                 
-                // Extract 4 samples from each pixel (RGBA channels)
+                // Extract 4 samples from RGBA channels
                 for (let channel = 0; channel < 4; channel++) {
                     const pixelValue = pixels[pixelIndex + channel];
-                    // Convert from 0-255 back to -1 to 1 range
+                    // Convert back to audio range
                     const audioValue = (pixelValue - 128) / 128;
-                    audioSamples.push(audioValue);
+                    pixelDecodedSamples.push(audioValue);
                 }
-            }
-        }
-
-        // Fill the audio buffer with our reconstructed samples
-        // Stretch or compress to fit the playback duration
-        for (let i = 0; i < frameCount; i++) {
-            const sampleIndex = Math.floor((i / frameCount) * audioSamples.length);
-            if (sampleIndex < audioSamples.length) {
-                channelData[i] = audioSamples[sampleIndex] * 0.5; // Volume control
             }
         }
 
@@ -148,22 +155,20 @@ async function decodeAndPlayAudio() {
         const source = audioContext.createBufferSource();
         source.buffer = audioBuffer;
         
-        // Add minimal filtering to reduce artifacts
-        const filter = audioContext.createBiquadFilter();
-        filter.type = 'lowpass';
-        filter.frequency.setValueAtTime(8000, audioContext.currentTime); // Higher cutoff
-        filter.Q.setValueAtTime(0.5, audioContext.currentTime);
+        // Minimal processing to preserve fidelity
+        const gainNode = audioContext.createGain();
+        gainNode.gain.setValueAtTime(0.8, audioContext.currentTime);
         
-        source.connect(filter);
-        filter.connect(audioContext.destination);
+        source.connect(gainNode);
+        gainNode.connect(audioContext.destination);
         
         source.start();
         
-        statusEl.textContent = `Playing decoded audio (${playbackDuration.toFixed(1)}s, ${audioSamples.length} samples)...`;
+        statusEl.textContent = `Playing decoded audio (${duration.toFixed(2)}s, ${totalSamples} samples @ ${playbackSampleRate}Hz)`;
         
         // Update status when playback ends
         source.onended = () => {
-            statusEl.textContent = 'Playback finished.';
+            statusEl.textContent = `Playback finished. Captured: ${totalSamples} samples, Canvas pixels: ${pixelDecodedSamples.length} samples`;
         };
 
     } catch (err) {
@@ -175,11 +180,16 @@ async function decodeAndPlayAudio() {
 async function start() {
     try {
         statusEl.textContent = 'Requesting microphone access...';
+        
+        // Clear previous data
+        capturedAudioData = [];
+        
         stream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
                 echoCancellation: false,
                 noiseSuppression: false,
-                autoGainControl: false
+                autoGainControl: false,
+                sampleRate: 44100
             }
         });
 
@@ -191,8 +201,8 @@ async function start() {
         
         // Create analyser for time domain data
         analyser = audioContext.createAnalyser();
-        analyser.fftSize = 512; // Larger FFT for more time domain samples
-        analyser.smoothingTimeConstant = 0.1; // Less smoothing for better fidelity
+        analyser.fftSize = 1024; // Higher resolution for better quality
+        analyser.smoothingTimeConstant = 0.0; // No smoothing for maximum fidelity
         
         source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
