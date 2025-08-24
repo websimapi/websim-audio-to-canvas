@@ -15,139 +15,114 @@ let stream;
 let analyser;
 let source;
 let isRecording = false;
-
-// Store captured audio data for accurate decoding
-let capturedAudioData = [];
-let originalSampleRate = 44100;
-let startTime = 0; // Add timing reference
-
-// We draw pixels column by column from left to right.
-let currentX = 0;
-
-// Animation frame for continuous drawing
 let animationFrameId;
+
+// We will write data sequentially like a file stream.
+// This tracks the current byte position in our "pixel file".
+let byteIndex = 0;
+const HEADER_SIZE_BYTES = 16; // 4 pixels for metadata
+
+function getPixelCoordinates(byteIdx) {
+    const pixelNum = Math.floor(byteIdx / 4);
+    const x = pixelNum % canvas.width;
+    const y = Math.floor(pixelNum / canvas.width);
+    return { x, y };
+}
+
+function expandCanvas() {
+    const newWidth = canvas.width * 2;
+    console.log(`Expanding canvas to ${newWidth}x${CANVAS_HEIGHT}`);
+    
+    // Create a temporary canvas to hold the current image data
+    const tempCanvas = document.createElement('canvas');
+    const tempCtx = tempCanvas.getContext('2d');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    tempCtx.drawImage(canvas, 0, 0);
+
+    // Resize the main canvas and draw the old data back
+    canvas.width = newWidth;
+    ctx.drawImage(tempCanvas, 0, 0);
+}
+
+// Writes the metadata header to the first few pixels.
+function writeHeader(sampleRate, bufferLength) {
+    const headerData = new Uint8ClampedArray(HEADER_SIZE_BYTES);
+    const headerView = new DataView(headerData.buffer);
+
+    // Magic number "ABV1" (Audio Bits Version 1) to identify our data
+    headerView.setUint8(0, 'A'.charCodeAt(0));
+    headerView.setUint8(1, 'B'.charCodeAt(0));
+    headerView.setUint8(2, 'V'.charCodeAt(0));
+    headerView.setUint8(3, '1'.charCodeAt(0));
+
+    // Store sampleRate (as Uint32)
+    headerView.setUint32(4, sampleRate, true); // little-endian
+
+    // Store bufferLength/fftSize (as Uint32)
+    headerView.setUint32(8, bufferLength, true);
+
+    // Reserved for future use (e.g., total sample count)
+    headerView.setUint32(12, 0, true);
+
+    const imageData = ctx.createImageData(4, 1);
+    imageData.data.set(headerData);
+    ctx.putImageData(imageData, 0, 0);
+
+    byteIndex = HEADER_SIZE_BYTES; // Start writing audio data after the header
+}
 
 // Function to draw audio data as pixels
 function drawAudioData() {
-    if (!isRecording || !analyser) {
-        return;
-    }
+    if (!isRecording || !analyser) return;
 
-    // Get time domain data with higher precision
     const bufferLength = analyser.fftSize;
     const dataArray = new Uint8Array(bufferLength);
     analyser.getByteTimeDomainData(dataArray);
-    
-    // Store the original sample rate for accurate playback
-    originalSampleRate = audioContext.sampleRate;
 
-    // Convert and store audio samples with full precision
-    const audioSamples = [];
-    for (let i = 0; i < bufferLength; i++) {
-        // Store original values directly for maximum fidelity
-        audioSamples.push(dataArray[i]);
-    }
-    capturedAudioData.push(...audioSamples);
+    // dataArray contains raw audio samples (0-255).
+    // We write these bytes directly to the RGBA channels of pixels.
+    for (let i = 0; i < dataArray.length; i += 4) {
+        const { x, y } = getPixelCoordinates(byteIndex);
 
-    // Create pixel data for one column
-    const imageData = ctx.createImageData(1, CANVAS_HEIGHT);
-    const pixels = imageData.data;
-
-    // Store metadata in the first column
-    if (currentX === 0) {
-        // Store sample rate in first 4 pixels (16 bytes total)
-        const sampleRateBytes = new Uint32Array([originalSampleRate]);
-        const sampleRateU8 = new Uint8Array(sampleRateBytes.buffer);
-        
-        // First pixel: sample rate (4 bytes in RGBA)
-        pixels[0] = sampleRateU8[0]; // R
-        pixels[1] = sampleRateU8[1]; // G  
-        pixels[2] = sampleRateU8[2]; // B
-        pixels[3] = sampleRateU8[3]; // A
-        
-        // Second pixel: buffer length info
-        const bufferLengthBytes = new Uint32Array([bufferLength]);
-        const bufferLengthU8 = new Uint8Array(bufferLengthBytes.buffer);
-        pixels[4] = bufferLengthU8[0]; // R
-        pixels[5] = bufferLengthU8[1]; // G
-        pixels[6] = bufferLengthU8[2]; // B
-        pixels[7] = bufferLengthU8[3]; // A
-        
-        // Third pixel: timestamp info
-        startTime = audioContext.currentTime;
-        const timeBytes = new Float32Array([startTime]);
-        const timeU8 = new Uint8Array(timeBytes.buffer);
-        pixels[8] = timeU8[0];   // R
-        pixels[9] = timeU8[1];   // G
-        pixels[10] = timeU8[2];  // B
-        pixels[11] = timeU8[3];  // A
-        
-        // Fill remaining pixels with audio data starting from pixel 3 (index 12)
-        for (let y = 3; y < CANVAS_HEIGHT; y++) {
-            const pixelIndex = y * 4;
-            const audioIndex = (y - 3) * 4;
-            
-            // Store 4 audio samples in RGBA channels with full 0-255 range
-            for (let channel = 0; channel < 4; channel++) {
-                if (audioIndex + channel < bufferLength) {
-                    pixels[pixelIndex + channel] = dataArray[audioIndex + channel];
-                } else {
-                    pixels[pixelIndex + channel] = 128; // Neutral value
-                }
-            }
+        // Expand canvas if we're about to write off the edge
+        if (x >= canvas.width) {
+            expandCanvas();
+            // Re-calculate coordinates with new width
+            const newCoords = getPixelCoordinates(byteIndex);
+            x = newCoords.x;
+            y = newCoords.y;
         }
-    } else {
-        // For subsequent columns, store only audio data using full RGBA
-        for (let y = 0; y < CANVAS_HEIGHT; y++) {
-            const pixelIndex = y * 4;
-            const audioBaseIndex = (currentX - 1) * (CANVAS_HEIGHT * 4) + (CANVAS_HEIGHT - 3) * 4 + y * 4;
-            
-            // Store 4 audio samples in RGBA channels
-            for (let channel = 0; channel < 4; channel++) {
-                const sampleIndex = audioBaseIndex + channel;
-                if (sampleIndex < capturedAudioData.length) {
-                    pixels[pixelIndex + channel] = capturedAudioData[sampleIndex];
-                } else {
-                    // Fill with new data if available
-                    const newSampleIndex = (y * 4 + channel) % bufferLength;
-                    pixels[pixelIndex + channel] = dataArray[newSampleIndex];
-                }
-            }
+
+        // We can't write past the canvas height. Stop if we run out of room.
+        if (y >= CANVAS_HEIGHT) {
+            console.warn("Canvas height limit reached. Stopping recording.");
+            stop();
+            statusEl.textContent = "Stopped: Ran out of vertical canvas space.";
+            return;
         }
+        
+        // We write 4 bytes at a time (one pixel)
+        const r = dataArray[i];
+        const g = dataArray[i + 1] !== undefined ? dataArray[i + 1] : 128;
+        const b = dataArray[i + 2] !== undefined ? dataArray[i + 2] : 128;
+        const a = dataArray[i + 3] !== undefined ? dataArray[i + 3] : 255; // Alpha full on
+
+        ctx.fillStyle = `rgba(${r},${g},${b},${a / 255})`;
+        ctx.fillRect(x, y, 1, 1);
+
+        byteIndex += 4;
     }
 
-    // Draw the column on the canvas
-    ctx.putImageData(imageData, currentX, 0);
-
-    // Move to the next column
-    currentX++;
-
-    // If we reach the end of the canvas, expand it
-    if (currentX >= canvas.width) {
-        const newWidth = canvas.width + INITIAL_CANVAS_WIDTH;
-        
-        // Create temporary canvas to preserve existing content
-        const tempCanvas = document.createElement('canvas');
-        const tempCtx = tempCanvas.getContext('2d');
-        tempCanvas.width = canvas.width;
-        tempCanvas.height = canvas.height;
-        tempCtx.drawImage(canvas, 0, 0);
-        
-        // Resize main canvas and restore content
-        canvas.width = newWidth;
-        ctx.drawImage(tempCanvas, 0, 0);
-    }
-    
     // Auto-scroll to show the latest data
-    canvasContainer.scrollLeft = Math.max(0, currentX - canvasContainer.clientWidth + 50);
-    
-    // Continue the animation loop
+    const currentPos = getPixelCoordinates(byteIndex);
+    canvasContainer.scrollLeft = Math.max(0, currentPos.x - canvasContainer.clientWidth + 50);
+
     animationFrameId = requestAnimationFrame(drawAudioData);
 }
 
-// Function to decode canvas pixels back to audio and play
 async function decodeAndPlayAudio() {
-    if (currentX === 0) {
+    if (byteIndex <= HEADER_SIZE_BYTES) {
         statusEl.textContent = 'No audio data to decode!';
         return;
     }
@@ -155,94 +130,63 @@ async function decodeAndPlayAudio() {
     try {
         statusEl.textContent = 'Decoding pixels to audio...';
         
-        // Create new audio context for playback if needed
-        if (!audioContext || audioContext.state === 'closed') {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        }
-        
-        if (audioContext.state === 'suspended') {
-            await audioContext.resume();
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
         }
 
-        // Extract all data from canvas pixels
-        const imageData = ctx.getImageData(0, 0, currentX, CANVAS_HEIGHT);
-        const pixels = imageData.data;
-        
-        // Extract metadata from first column
-        const sampleRateU8 = new Uint8Array(4);
-        sampleRateU8[0] = pixels[0];  // R
-        sampleRateU8[1] = pixels[1];  // G
-        sampleRateU8[2] = pixels[2];  // B
-        sampleRateU8[3] = pixels[3];  // A
-        const decodedSampleRate = new Uint32Array(sampleRateU8.buffer)[0];
-        
-        const bufferLengthU8 = new Uint8Array(4);
-        bufferLengthU8[0] = pixels[4];  // R
-        bufferLengthU8[1] = pixels[5];  // G
-        bufferLengthU8[2] = pixels[6];  // B
-        bufferLengthU8[3] = pixels[7];  // A
-        const decodedBufferLength = new Uint32Array(bufferLengthU8.buffer)[0];
+        const maxPixelsToRead = Math.ceil(byteIndex / 4);
+        const maxX = maxPixelsToRead % canvas.width;
+        const maxY = Math.floor(maxPixelsToRead / canvas.width);
+        const lastRowWidth = maxY + 1 > CANVAS_HEIGHT ? 0 : (maxY === Math.floor((maxPixelsToRead-1)/canvas.width)) ? maxX : canvas.width;
+        const totalRows = Math.min(CANVAS_HEIGHT, maxY + 1);
 
-        // Extract all audio samples from pixels
-        let allSamples = [];
-        
-        // First column: extract from pixel 3 onwards (skip metadata pixels)
-        for (let y = 3; y < CANVAS_HEIGHT; y++) {
-            const pixelIndex = y * 4;
-            // Extract 4 samples from RGBA
-            for (let channel = 0; channel < 4; channel++) {
-                const pixelValue = pixels[pixelIndex + channel];
-                // Convert from 0-255 to -1 to 1 range for audio
-                const audioValue = (pixelValue - 128) / 128;
-                allSamples.push(audioValue);
-            }
-        }
-        
-        // Remaining columns: extract all pixels as audio data
-        for (let x = 1; x < currentX; x++) {
-            for (let y = 0; y < CANVAS_HEIGHT; y++) {
-                const pixelIndex = (y * currentX + x) * 4;
-                
-                // Extract 4 samples from RGBA channels
-                for (let channel = 0; channel < 4; channel++) {
-                    const pixelValue = pixels[pixelIndex + channel];
-                    // Convert from 0-255 to -1 to 1 range for audio
-                    const audioValue = (pixelValue - 128) / 128;
-                    allSamples.push(audioValue);
-                }
-            }
+        // Read pixel data
+        const imageData = ctx.getImageData(0, 0, canvas.width, totalRows).data;
+
+        // Read Header
+        const headerView = new DataView(imageData.buffer, 0, HEADER_SIZE_BYTES);
+        const magic = String.fromCharCode(headerView.getUint8(0), headerView.getUint8(1), headerView.getUint8(2), headerView.getUint8(3));
+
+        if (magic !== 'ABV1') {
+            throw new Error('Invalid data format. Magic number mismatch.');
         }
 
-        const totalSamples = allSamples.length;
-        const duration = totalSamples / decodedSampleRate;
+        const decodedSampleRate = headerView.getUint32(4, true);
+
+        // Extract all audio bytes
+        const audioBytes = [];
+        const totalBytesToRead = byteIndex;
+
+        for (let i = HEADER_SIZE_BYTES; i < totalBytesToRead; i++) {
+             audioBytes.push(imageData[i]);
+        }
         
-        // Create audio buffer with decoded parameters
-        const audioBuffer = audioContext.createBuffer(1, totalSamples, decodedSampleRate);
+        const totalSamples = audioBytes.length;
+        if(totalSamples === 0) {
+            statusEl.textContent = 'No audio samples decoded.';
+            return;
+        }
+
+        const audioBuffer = audioCtx.createBuffer(1, totalSamples, decodedSampleRate);
         const channelData = audioBuffer.getChannelData(0);
 
-        // Copy decoded samples to audio buffer
+        // Convert from Uint8 (0-255) to Float32 (-1.0 to 1.0)
         for (let i = 0; i < totalSamples; i++) {
-            channelData[i] = allSamples[i] * 0.8; // Volume adjustment
+            channelData[i] = (audioBytes[i] / 127.5) - 1.0;
         }
 
-        // Create buffer source and play
-        const source = audioContext.createBufferSource();
+        const source = audioCtx.createBufferSource();
         source.buffer = audioBuffer;
-        
-        // Minimal processing to preserve fidelity
-        const gainNode = audioContext.createGain();
-        gainNode.gain.setValueAtTime(0.8, audioContext.currentTime);
-        
-        source.connect(gainNode);
-        gainNode.connect(audioContext.destination);
-        
+        source.connect(audioCtx.destination);
         source.start();
-        
-        statusEl.textContent = `Playing decoded audio (${duration.toFixed(2)}s, ${totalSamples} samples @ ${decodedSampleRate}Hz from pixels)`;
-        
-        // Update status when playback ends
+
+        const duration = audioBuffer.duration;
+        statusEl.textContent = `Playing decoded audio (${duration.toFixed(2)}s @ ${decodedSampleRate}Hz)`;
+
         source.onended = () => {
-            statusEl.textContent = `Playback finished. Decoded from pixels: ${totalSamples} samples @ ${decodedSampleRate}Hz`;
+            statusEl.textContent = `Playback finished. Decoded ${totalSamples} samples.`;
+            audioCtx.close();
         };
 
     } catch (err) {
@@ -255,28 +199,20 @@ async function start() {
     try {
         statusEl.textContent = 'Requesting microphone access...';
         
-        // Clear previous data
-        capturedAudioData = [];
-        
         stream = await navigator.mediaDevices.getUserMedia({ 
             audio: {
                 echoCancellation: false,
                 noiseSuppression: false,
                 autoGainControl: false,
-                sampleRate: 44100
             }
         });
 
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioContext.state === 'suspended') await audioContext.resume();
         
-        if (audioContext.state === 'suspended') {
-            await audioContext.resume();
-        }
-        
-        // Create analyser for time domain data
         analyser = audioContext.createAnalyser();
-        analyser.fftSize = 1024; // Higher resolution for better quality
-        analyser.smoothingTimeConstant = 0.0; // No smoothing for maximum fidelity
+        analyser.fftSize = 2048; // A common, good-quality buffer size
+        analyser.smoothingTimeConstant = 0.0;
         
         source = audioContext.createMediaStreamSource(stream);
         source.connect(analyser);
@@ -284,13 +220,13 @@ async function start() {
         isRecording = true;
         startButton.textContent = 'Stop Listening';
         startButton.classList.add('recording');
-        statusEl.textContent = 'Listening... Speak to see audio pixels appear!';
+        statusEl.textContent = 'Listening... Speak to generate audio pixels.';
 
-        // Clear canvas and reset position
         ctx.clearRect(0, 0, canvas.width, canvas.height);
-        currentX = 0;
+        byteIndex = 0;
+        
+        writeHeader(audioContext.sampleRate, analyser.fftSize);
 
-        // Start the drawing loop
         drawAudioData();
 
     } catch (err) {
@@ -300,16 +236,10 @@ async function start() {
 }
 
 function stop() {
-    if (stream) {
-        stream.getTracks().forEach(track => track.stop());
-    }
-    if (source) {
-        source.disconnect();
-    }
-    if (audioContext) {
-        audioContext.close().then(() => {
-            audioContext = null;
-        });
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    if (source) source.disconnect();
+    if (audioContext && audioContext.state !== 'closed') {
+        audioContext.close().then(() => audioContext = null);
     }
 
     if (animationFrameId) {
@@ -317,14 +247,12 @@ function stop() {
         animationFrameId = null;
     }
 
-    analyser = null;
     isRecording = false;
     startButton.textContent = 'Start Listening';
     startButton.classList.remove('recording');
-    statusEl.textContent = 'Stopped. Click "Start Listening" to begin again.';
+    statusEl.textContent = 'Stopped. Ready to record again or play back.';
     
-    // Enable play button when we have data
-    if (currentX > 0) {
+    if (byteIndex > HEADER_SIZE_BYTES) {
         playButton.disabled = false;
     }
 }
@@ -333,7 +261,6 @@ playButton.addEventListener('click', decodeAndPlayAudio);
 
 startButton.addEventListener('click', () => {
     if (!isRecording) {
-        // Disable play button while recording
         playButton.disabled = true;
         start();
     } else {
