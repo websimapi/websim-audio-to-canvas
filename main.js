@@ -18,54 +18,53 @@ let isRecording = false;
 // We draw pixels column by column from left to right.
 let currentX = 0;
 
-// Buffer to hold audio data between processing frames
-let audioDataQueue = [];
+// Buffer to hold continuous audio data
+let audioBuffer = new Float32Array(0);
 let animationFrameId;
 
 // Function to handle drawing the audio data to the canvas
 function drawAudioColumns() {
-    // Process all data in the queue
-    while (audioDataQueue.length > 0) {
-        const buffer = audioDataQueue.shift();
-        
-        // We need 4 audio samples to create one RGBA pixel.
-        // Each column is CANVAS_HEIGHT pixels tall.
-        const samplesPerColumn = CANVAS_HEIGHT * 4;
+    const samplesPerColumn = CANVAS_HEIGHT * 4; // 4 samples for R, G, B, A
 
-        if (buffer.length >= samplesPerColumn) {
-            const pixelData = new Uint8ClampedArray(samplesPerColumn);
+    // Process as many full columns as we have data for
+    while (audioBuffer.length >= samplesPerColumn) {
+        // Take the samples needed for one column from the start of the buffer
+        const columnSamples = audioBuffer.subarray(0, samplesPerColumn);
+        const pixelData = new Uint8ClampedArray(samplesPerColumn);
 
-            for (let i = 0; i < samplesPerColumn; i++) {
-                // Map audio sample from [-1, 1] to a color component [0, 255]
-                pixelData[i] = (buffer[i] + 1) * 127.5;
-            }
-
-            // Create an ImageData object for the single column
-            const columnImageData = new ImageData(pixelData, 1, CANVAS_HEIGHT);
-
-            // Draw this column onto the canvas at the current X position
-            ctx.putImageData(columnImageData, currentX, 0);
-
-            // Move to the next column
-            currentX++;
-
-            // If we reach the end of the canvas, expand it
-            if (currentX >= canvas.width) {
-                const newWidth = canvas.width + INITIAL_CANVAS_WIDTH;
-                // Create a temporary canvas to hold the current content
-                const tempCanvas = document.createElement('canvas');
-                tempCanvas.width = canvas.width;
-                tempCanvas.height = canvas.height;
-                const tempCtx = tempCanvas.getContext('2d');
-                tempCtx.drawImage(canvas, 0, 0);
-                // Resize the main canvas and draw the old content back
-                canvas.width = newWidth;
-                ctx.drawImage(tempCanvas, 0, 0);
-            }
-            
-            // Auto-scroll to the latest drawing position
-            canvasContainer.scrollLeft = currentX;
+        for (let i = 0; i < samplesPerColumn; i++) {
+            // Map audio sample from [-1, 1] to a color component [0, 255]
+            pixelData[i] = (columnSamples[i] + 1) * 127.5;
         }
+
+        // Create an ImageData object for the single column
+        const columnImageData = new ImageData(pixelData, 1, CANVAS_HEIGHT);
+
+        // Draw this column onto the canvas at the current X position
+        ctx.putImageData(columnImageData, currentX, 0);
+
+        // Move to the next column
+        currentX++;
+
+        // If we reach the end of the canvas, expand it
+        if (currentX >= canvas.width) {
+            const newWidth = canvas.width + INITIAL_CANVAS_WIDTH;
+            // Create a temporary canvas to hold the current content
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = canvas.width;
+            tempCanvas.height = canvas.height;
+            const tempCtx = tempCanvas.getContext('2d');
+            tempCtx.drawImage(canvas, 0, 0);
+            // Resize the main canvas and draw the old content back
+            canvas.width = newWidth;
+            ctx.drawImage(tempCanvas, 0, 0);
+        }
+        
+        // Auto-scroll to the latest drawing position
+        canvasContainer.scrollLeft = currentX;
+        
+        // Remove the processed samples from the main buffer
+        audioBuffer = audioBuffer.subarray(samplesPerColumn);
     }
     // Continue the drawing loop
     animationFrameId = requestAnimationFrame(drawAudioColumns);
@@ -94,10 +93,11 @@ async function start() {
             const inputBuffer = audioProcessingEvent.inputBuffer;
             const inputData = inputBuffer.getChannelData(0); // Get data from the first channel
             
-            // The getChannelData returns a Float32Array, which is what we want.
-            // We push the whole buffer to our queue.
-            // A copy is needed because the underlying buffer is reused.
-            audioDataQueue.push(new Float32Array(inputData));
+            // Append new data to our continuous buffer
+            const newBuffer = new Float32Array(audioBuffer.length + inputData.length);
+            newBuffer.set(audioBuffer);
+            newBuffer.set(inputData, audioBuffer.length);
+            audioBuffer = newBuffer;
         };
 
         source.connect(scriptNode);
@@ -141,8 +141,8 @@ function stop() {
         animationFrameId = null;
     }
 
-    // Clear any remaining data
-    audioDataQueue = [];
+    // Clear the buffer
+    audioBuffer = new Float32Array(0);
 
     isRecording = false;
     startButton.textContent = 'Start Listening';
