@@ -3,6 +3,7 @@ const canvasContainer = document.getElementById('canvas-container');
 const ctx = canvas.getContext('2d');
 const startButton = document.getElementById('startButton');
 const statusEl = document.getElementById('status');
+const playButton = document.getElementById('playButton');
 
 const CANVAS_HEIGHT = 42;
 const INITIAL_CANVAS_WIDTH = 1000;
@@ -80,6 +81,97 @@ function drawAudioData() {
     animationFrameId = requestAnimationFrame(drawAudioData);
 }
 
+// Function to decode canvas pixels back to audio and play
+async function decodeAndPlayAudio() {
+    if (currentX === 0) {
+        statusEl.textContent = 'No audio data to decode!';
+        return;
+    }
+
+    try {
+        statusEl.textContent = 'Decoding pixels to audio...';
+        
+        // Create new audio context for playback if needed
+        if (!audioContext || audioContext.state === 'closed') {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        }
+        
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+
+        // Get pixel data from canvas
+        const imageData = ctx.getImageData(0, 0, currentX, CANVAS_HEIGHT);
+        const pixels = imageData.data;
+
+        // Duration: each column represents ~20ms of audio (50fps)
+        const duration = currentX * 0.02;
+        const sampleRate = audioContext.sampleRate;
+        const frameCount = duration * sampleRate;
+        
+        // Create audio buffer
+        const audioBuffer = audioContext.createBuffer(1, frameCount, sampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+
+        // Convert pixels back to audio
+        for (let x = 0; x < currentX; x++) {
+            // Calculate time position for this column
+            const timeStart = (x / currentX) * duration;
+            const sampleStart = Math.floor(timeStart * sampleRate);
+            const sampleEnd = Math.floor(((x + 1) / currentX) * duration * sampleRate);
+
+            // Extract frequency data from this column
+            const frequencies = [];
+            for (let y = 0; y < CANVAS_HEIGHT; y++) {
+                const pixelIndex = (y * currentX + x) * 4;
+                const red = pixels[pixelIndex];
+                // Convert back from our encoding (we used red channel primarily)
+                frequencies.push(red);
+            }
+
+            // Generate audio samples for this time slice using frequency data
+            for (let sample = sampleStart; sample < sampleEnd && sample < frameCount; sample++) {
+                let amplitude = 0;
+                const time = sample / sampleRate;
+                
+                // Create audio by combining sine waves based on frequency data
+                for (let freqBin = 0; freqBin < frequencies.length; freqBin++) {
+                    const frequency = (freqBin / frequencies.length) * 1000 + 100; // 100-1100 Hz range
+                    const magnitude = frequencies[freqBin] / 255 * 0.1; // Scale down volume
+                    amplitude += Math.sin(2 * Math.PI * frequency * time) * magnitude;
+                }
+                
+                channelData[sample] = amplitude * 0.3; // Overall volume control
+            }
+        }
+
+        // Create buffer source and play
+        const source = audioContext.createBufferSource();
+        source.buffer = audioBuffer;
+        
+        // Add some filtering to make it sound less harsh
+        const filter = audioContext.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(800, audioContext.currentTime);
+        
+        source.connect(filter);
+        filter.connect(audioContext.destination);
+        
+        source.start();
+        
+        statusEl.textContent = `Playing decoded audio (${duration.toFixed(1)}s)...`;
+        
+        // Update status when playback ends
+        source.onended = () => {
+            statusEl.textContent = 'Playback finished.';
+        };
+
+    } catch (err) {
+        console.error('Error decoding audio:', err);
+        statusEl.textContent = `Error playing audio: ${err.message}`;
+    }
+}
+
 async function start() {
     try {
         statusEl.textContent = 'Requesting microphone access...';
@@ -146,10 +238,19 @@ function stop() {
     startButton.textContent = 'Start Listening';
     startButton.classList.remove('recording');
     statusEl.textContent = 'Stopped. Click "Start Listening" to begin again.';
+    
+    // Enable play button when we have data
+    if (currentX > 0) {
+        playButton.disabled = false;
+    }
 }
+
+playButton.addEventListener('click', decodeAndPlayAudio);
 
 startButton.addEventListener('click', () => {
     if (!isRecording) {
+        // Disable play button while recording
+        playButton.disabled = true;
         start();
     } else {
         stop();

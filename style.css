@@ -85,3 +85,29 @@ p {
     color: #888;
 }
 
+#playButton {
+    background-color: #ff9800;
+    color: #121212;
+    border: none;
+    padding: 12px 24px;
+    font-size: 1rem;
+    font-weight: bold;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.3s ease, transform 0.1s ease;
+    margin-left: 10px;
+}
+
+#playButton:hover:not(:disabled) {
+    background-color: #ffb74d;
+}
+
+#playButton:active:not(:disabled) {
+    transform: scale(0.98);
+}
+
+#playButton:disabled {
+    background-color: #444;
+    color: #666;
+    cursor: not-allowed;
+}
