@@ -1,0 +1,87 @@
+body {
+    background-color: #121212;
+    color: #e0e0e0;
+    font-family: 'Roboto Mono', monospace;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    min-height: 100vh;
+    margin: 0;
+    text-align: center;
+    overflow-x: hidden;
+}
+
+#container {
+    max-width: 90%;
+    width: 600px;
+    padding: 20px;
+    background-color: #1e1e1e;
+    border-radius: 12px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+h1 {
+    color: #bb86fc;
+}
+
+p {
+    font-size: 0.9rem;
+    color: #a0a0a0;
+}
+
+#canvas-container {
+    width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    border: 1px solid #333;
+    border-radius: 4px;
+    margin: 20px 0;
+    -webkit-overflow-scrolling: touch; /* Smooth scrolling on iOS */
+}
+
+#audioCanvas {
+    background-color: #000;
+    image-rendering: pixelated;
+    display: block;
+}
+
+#controls {
+    margin-top: 20px;
+}
+
+#startButton {
+    background-color: #03dac6;
+    color: #121212;
+    border: none;
+    padding: 12px 24px;
+    font-size: 1rem;
+    font-weight: bold;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background-color 0.3s ease, transform 0.1s ease;
+}
+
+#startButton:hover {
+    background-color: #32fdec;
+}
+
+#startButton:active {
+    transform: scale(0.98);
+}
+
+#startButton.recording {
+    background-color: #cf6679;
+    color: #121212;
+}
+
+#startButton.recording:hover {
+    background-color: #ff899d;
+}
+
+#status {
+    margin-top: 15px;
+    min-height: 1.2em;
+    font-size: 0.8rem;
+    color: #888;
+}
+
