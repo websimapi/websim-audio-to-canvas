@@ -19,6 +19,7 @@ let isRecording = false;
 // Store captured audio data for accurate decoding
 let capturedAudioData = [];
 let originalSampleRate = 44100;
+let startTime = 0; // Add timing reference
 
 // We draw pixels column by column from left to right.
 let currentX = 0;
@@ -40,31 +41,77 @@ function drawAudioData() {
     // Store the original sample rate for accurate playback
     originalSampleRate = audioContext.sampleRate;
 
-    // Convert to proper audio range and store for decoding
+    // Convert and store audio samples with full precision
     const audioSamples = [];
     for (let i = 0; i < bufferLength; i++) {
-        // Convert from 0-255 to -1 to 1 range with higher precision
-        const audioValue = (dataArray[i] - 128) / 128;
-        audioSamples.push(audioValue);
+        // Store original values directly for maximum fidelity
+        audioSamples.push(dataArray[i]);
     }
     capturedAudioData.push(...audioSamples);
 
-    // Create pixel data for one column - store 4 samples per pixel (RGBA)
+    // Create pixel data for one column
     const imageData = ctx.createImageData(1, CANVAS_HEIGHT);
     const pixels = imageData.data;
 
-    // Fill pixels with audio data - each pixel stores 4 audio samples
-    for (let y = 0; y < CANVAS_HEIGHT; y++) {
-        const pixelIndex = y * 4;
+    // Store metadata in the first column
+    if (currentX === 0) {
+        // Store sample rate in first 4 pixels (16 bytes total)
+        const sampleRateBytes = new Uint32Array([originalSampleRate]);
+        const sampleRateU8 = new Uint8Array(sampleRateBytes.buffer);
         
-        // Store 4 audio samples in RGBA channels with full precision
-        for (let channel = 0; channel < 4; channel++) {
-            const sampleIndex = (y * 4 + channel) % bufferLength;
-            if (sampleIndex < bufferLength) {
-                // Store original byte values for perfect reconstruction
-                pixels[pixelIndex + channel] = dataArray[sampleIndex];
-            } else {
-                pixels[pixelIndex + channel] = 128; // Neutral value
+        // First pixel: sample rate (4 bytes in RGBA)
+        pixels[0] = sampleRateU8[0]; // R
+        pixels[1] = sampleRateU8[1]; // G  
+        pixels[2] = sampleRateU8[2]; // B
+        pixels[3] = sampleRateU8[3]; // A
+        
+        // Second pixel: buffer length info
+        const bufferLengthBytes = new Uint32Array([bufferLength]);
+        const bufferLengthU8 = new Uint8Array(bufferLengthBytes.buffer);
+        pixels[4] = bufferLengthU8[0]; // R
+        pixels[5] = bufferLengthU8[1]; // G
+        pixels[6] = bufferLengthU8[2]; // B
+        pixels[7] = bufferLengthU8[3]; // A
+        
+        // Third pixel: timestamp info
+        startTime = audioContext.currentTime;
+        const timeBytes = new Float32Array([startTime]);
+        const timeU8 = new Uint8Array(timeBytes.buffer);
+        pixels[8] = timeU8[0];   // R
+        pixels[9] = timeU8[1];   // G
+        pixels[10] = timeU8[2];  // B
+        pixels[11] = timeU8[3];  // A
+        
+        // Fill remaining pixels with audio data starting from pixel 3 (index 12)
+        for (let y = 3; y < CANVAS_HEIGHT; y++) {
+            const pixelIndex = y * 4;
+            const audioIndex = (y - 3) * 4;
+            
+            // Store 4 audio samples in RGBA channels with full 0-255 range
+            for (let channel = 0; channel < 4; channel++) {
+                if (audioIndex + channel < bufferLength) {
+                    pixels[pixelIndex + channel] = dataArray[audioIndex + channel];
+                } else {
+                    pixels[pixelIndex + channel] = 128; // Neutral value
+                }
+            }
+        }
+    } else {
+        // For subsequent columns, store only audio data using full RGBA
+        for (let y = 0; y < CANVAS_HEIGHT; y++) {
+            const pixelIndex = y * 4;
+            const audioBaseIndex = (currentX - 1) * (CANVAS_HEIGHT * 4) + (CANVAS_HEIGHT - 3) * 4 + y * 4;
+            
+            // Store 4 audio samples in RGBA channels
+            for (let channel = 0; channel < 4; channel++) {
+                const sampleIndex = audioBaseIndex + channel;
+                if (sampleIndex < capturedAudioData.length) {
+                    pixels[pixelIndex + channel] = capturedAudioData[sampleIndex];
+                } else {
+                    // Fill with new data if available
+                    const newSampleIndex = (y * 4 + channel) % bufferLength;
+                    pixels[pixelIndex + channel] = dataArray[newSampleIndex];
+                }
             }
         }
     }
@@ -100,7 +147,7 @@ function drawAudioData() {
 
 // Function to decode canvas pixels back to audio and play
 async function decodeAndPlayAudio() {
-    if (currentX === 0 || capturedAudioData.length === 0) {
+    if (currentX === 0) {
         statusEl.textContent = 'No audio data to decode!';
         return;
     }
@@ -117,38 +164,65 @@ async function decodeAndPlayAudio() {
             await audioContext.resume();
         }
 
-        // Use the stored audio data for accurate reconstruction
-        const totalSamples = capturedAudioData.length;
-        const playbackSampleRate = originalSampleRate;
-        const duration = totalSamples / playbackSampleRate;
-        
-        // Create audio buffer with exact sample count
-        const audioBuffer = audioContext.createBuffer(1, totalSamples, playbackSampleRate);
-        const channelData = audioBuffer.getChannelData(0);
-
-        // Copy our stored audio data directly (no conversion needed)
-        for (let i = 0; i < totalSamples; i++) {
-            channelData[i] = capturedAudioData[i] * 0.8; // Slight volume adjustment
-        }
-
-        // Verify by also decoding from canvas pixels as backup
+        // Extract all data from canvas pixels
         const imageData = ctx.getImageData(0, 0, currentX, CANVAS_HEIGHT);
         const pixels = imageData.data;
         
-        // Extract audio samples from pixels as verification
-        let pixelDecodedSamples = [];
-        for (let x = 0; x < currentX; x++) {
+        // Extract metadata from first column
+        const sampleRateU8 = new Uint8Array(4);
+        sampleRateU8[0] = pixels[0];  // R
+        sampleRateU8[1] = pixels[1];  // G
+        sampleRateU8[2] = pixels[2];  // B
+        sampleRateU8[3] = pixels[3];  // A
+        const decodedSampleRate = new Uint32Array(sampleRateU8.buffer)[0];
+        
+        const bufferLengthU8 = new Uint8Array(4);
+        bufferLengthU8[0] = pixels[4];  // R
+        bufferLengthU8[1] = pixels[5];  // G
+        bufferLengthU8[2] = pixels[6];  // B
+        bufferLengthU8[3] = pixels[7];  // A
+        const decodedBufferLength = new Uint32Array(bufferLengthU8.buffer)[0];
+
+        // Extract all audio samples from pixels
+        let allSamples = [];
+        
+        // First column: extract from pixel 3 onwards (skip metadata pixels)
+        for (let y = 3; y < CANVAS_HEIGHT; y++) {
+            const pixelIndex = y * 4;
+            // Extract 4 samples from RGBA
+            for (let channel = 0; channel < 4; channel++) {
+                const pixelValue = pixels[pixelIndex + channel];
+                // Convert from 0-255 to -1 to 1 range for audio
+                const audioValue = (pixelValue - 128) / 128;
+                allSamples.push(audioValue);
+            }
+        }
+        
+        // Remaining columns: extract all pixels as audio data
+        for (let x = 1; x < currentX; x++) {
             for (let y = 0; y < CANVAS_HEIGHT; y++) {
                 const pixelIndex = (y * currentX + x) * 4;
                 
                 // Extract 4 samples from RGBA channels
                 for (let channel = 0; channel < 4; channel++) {
                     const pixelValue = pixels[pixelIndex + channel];
-                    // Convert back to audio range
+                    // Convert from 0-255 to -1 to 1 range for audio
                     const audioValue = (pixelValue - 128) / 128;
-                    pixelDecodedSamples.push(audioValue);
+                    allSamples.push(audioValue);
                 }
             }
+        }
+
+        const totalSamples = allSamples.length;
+        const duration = totalSamples / decodedSampleRate;
+        
+        // Create audio buffer with decoded parameters
+        const audioBuffer = audioContext.createBuffer(1, totalSamples, decodedSampleRate);
+        const channelData = audioBuffer.getChannelData(0);
+
+        // Copy decoded samples to audio buffer
+        for (let i = 0; i < totalSamples; i++) {
+            channelData[i] = allSamples[i] * 0.8; // Volume adjustment
         }
 
         // Create buffer source and play
@@ -164,11 +238,11 @@ async function decodeAndPlayAudio() {
         
         source.start();
         
-        statusEl.textContent = `Playing decoded audio (${duration.toFixed(2)}s, ${totalSamples} samples @ ${playbackSampleRate}Hz)`;
+        statusEl.textContent = `Playing decoded audio (${duration.toFixed(2)}s, ${totalSamples} samples @ ${decodedSampleRate}Hz from pixels)`;
         
         // Update status when playback ends
         source.onended = () => {
-            statusEl.textContent = `Playback finished. Captured: ${totalSamples} samples, Canvas pixels: ${pixelDecodedSamples.length} samples`;
+            statusEl.textContent = `Playback finished. Decoded from pixels: ${totalSamples} samples @ ${decodedSampleRate}Hz`;
         };
 
     } catch (err) {
